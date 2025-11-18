@@ -1,0 +1,10 @@
+name: Start TTS caching
+on:
+  workflow_dispatch:
+run-name: ${{ github.actor }} is caching TTS samples
+jobs:
+  tts-cache:
+    runs-on: self-hosted 
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker compose -f .\tts\docker-compose.yaml --env-file .env up -d --build
