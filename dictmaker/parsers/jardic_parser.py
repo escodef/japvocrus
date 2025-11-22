@@ -1,128 +1,133 @@
-from models.models import Translation, Sense
-from bs4 import BeautifulSoup
+from models.models import Translation
+from bs4 import BeautifulSoup, Tag
 import requests
 from typing import List
 from parsers.tatoeba_parser import TatoebaParser
+import logging
+import re
+import html2text
 
 class JardicParser():
     def __init__(self):
         super().__init__()
+        self.logger = logging.getLogger(__name__)
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:145.0) Gecko/20100101 Firefox/145.0'
         })
         self.tatoeba_parser = TatoebaParser()
+        self.short_article_template = r'^[^\n]*\n\[[^\]]+\]$'
+        self.h2t = html2text.HTML2Text()
+        self.h2t.ignore_emphasis = True
+        self.h2t.ignore_tables = True
 
-    def parse_word(self, word: str) -> Translation:
+    def parse_word(self, wordlist: List[str]) -> Translation | None:
+        word = wordlist[0]
+        POS = wordlist[1]
+        katakana_reading = wordlist[2]
+        
         try:
-            url = f"https://www.jardic.ru/search/search_r.php?q={word}&pg=0&sw=1472"
+            url = f"https://www.jardic.ru/search/search_r.php?q={word}&pg=0&sw=1472&dic_yarxi=1"
             
             response = self.session.get(url)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.content, 'html.parser')
+            tab = soup.find(id="tabContent")
+
+            if not tab:
+                self.logger.debug(f"No tabContent found for word: {word}")
+                return None
+
+            rows = tab.select("tr")
+            if not rows:
+                self.logger.debug(f"No rows in tab for word: {word}")
+                return None
             
-            word_element = soup.find('td', id='word-0-0')
-            if not word_element:
-                raise ValueError(f"Word element not found for: {word}")
+            self.logger.debug(len(rows))
             
-            return self._parse_word_element(word_element, word)
+            for row in rows:
+                td = row.find("td") or row.select_one('td[id^="word-"]')
+            
+                if not td:
+                    self.logger.debug(f"No matching td in row for word: {word}")
+                    continue
+    
+                text = self.h2t.handle(str(td))
+
+                if not text:
+                    self.logger.debug(f"No text extracted for word: {word}")
+                    continue
+
+                lines = text.splitlines()
+
+                lines = [line.strip() for line in lines]
+
+                text = "\n".join(lines)
+
+                if re.search(self.short_article_template, text, re.MULTILINE):
+                    self.logger.debug(text)
+                    self.logger.debug('this is a short article')
+                    
+                    senses = re.sub(r'^.*\n\[.*\]\n', '', text, flags=re.DOTALL)
+                    
+                    mainsense_match = re.search(r'[ЁёА-я].*?;', text)
+                    mainsense = mainsense_match.group().rstrip(';') if mainsense_match else senses
+
+                    self.logger.debug(senses)
+
+
+                    t = Translation(
+                        word=word,
+                        reading=katakana_reading,
+                        mainsense=mainsense,
+                        senses=senses.strip()
+                    )
+                    return t
+                else:
+                    self.logger.debug('this is a long article')
+                    sep = '\nВ сочетаниях'
+                    text, _, _ = text.partition(sep)
+                    self.logger.debug(text)
+
+                    pattern = re.compile(rf'^{re.escape(word)}.*$', re.MULTILINE)
+
+                    matches: List[str] = pattern.findall(text)
+                    mainsense = matches[0].replace(word,"").strip()
+                    
+                    self.logger.debug("matches found")
+                    self.logger.debug(matches)
+
+
+                    senses = "\n".join(matches[1:])
+
+                    t = Translation(
+                        word=word,
+                        reading=katakana_reading,
+                        mainsense=mainsense,
+                        senses=senses
+                    )
+                    return t
+
             
         except Exception as e:
-            self.logger.error(f"Failed to parse {word}: {e}")
-            raise
+            self.logger.error(f"Error parsing word {word}: {e}")
+            return None
 
-    def _parse_word_element(self, word_element, original_word: str) -> Translation:
-        word_ja = ""
-        reading = ""
-        
-        word_spans = word_element.find_all('span')
-        if word_spans:
-            first_span = word_spans[0]
-            word_ja = first_span.get_text(strip=True)
-            
-            if len(word_spans) > 1:
-                reading_span = word_spans[1]
-                reading = reading_span.get_text(strip=True)
-        
-        if not word_ja:
-            font_element = word_element.find('font')
-            if font_element:
-                word_ja = font_element.get_text(strip=True)
-        
-        if not word_ja:
-            word_ja = original_word
-        
-        senses = self._parse_senses(word_element)
 
-        examples = self.tatoeba_parser.parse_word(original_word)
-        
-        return Translation(
-            word=reading,
-            reading=word_ja,
-            senses=senses,
-            examples=examples
-        )
+    def _extract_rendered_text(self, element: Tag):
+        result = []
 
-    def _parse_senses(self, word_element) -> List[Sense]:
-        senses = []
-        
-        black_spans = word_element.find_all('span', style=lambda x: x and 'color: #000000' in x)
-        
-        for span in black_spans:
-            text = span.get_text(separator='\n', strip=True)
-            sense_lines = [line.strip() for line in text.split('\n') if line.strip()]
-            
-            for line in sense_lines:
-                if line.startswith('•'):
-                    sense_text = line[1:].strip()
-                    
-                    ru_text = sense_text
-                    notes = ""
-                    
-                    if '(' in sense_text and ')' in sense_text:
-                        start_idx = sense_text.find('(')
-                        end_idx = sense_text.find(')', start_idx)
-                        if start_idx != -1 and end_idx != -1:
-                            ru_text = sense_text[:start_idx].strip()
-                            notes = sense_text[start_idx + 1:end_idx].strip()
-                    
-                    sense = Sense(
-                        ru=ru_text,
-                        notes=notes,
-                    )
-                    senses.append(sense)
-        
-        if not senses:
-            senses = self._parse_senses_alternative(word_element)
-        
-        return senses
+        for child in element.descendants:
+            if child.name is None:
+                txt = child.strip()
+                if txt:
+                    result.append(txt)
 
-    def _parse_senses_alternative(self, word_element) -> List[Sense]:
-        """Нейронка говорит так тоже можно"""
-        senses = []
+            if child.name == "br":
+                result.append("\n")
 
-        full_text = word_element.get_text(separator='\n', strip=True)
-        lines = [line.strip() for line in full_text.split('\n') if line.strip()]
-        
-        for line in lines:
-            if line.startswith('•'):
-                sense_text = line[1:].strip()
-                
-                ru_text = sense_text
-                notes = ""
-                
-                if '(' in sense_text and ')' in sense_text:
-                    start_idx = sense_text.find('(')
-                    end_idx = sense_text.find(')', start_idx)
-                    if start_idx != -1 and end_idx != -1:
-                        ru_text = sense_text[:start_idx].strip()
-                        notes = sense_text[start_idx + 1:end_idx].strip()
-                
-                sense = Sense(
-                    ru=ru_text,
-                    notes=notes,
-                )
-                senses.append(sense)
-        
-        return senses
+        text = " ".join(result)
+
+        text = text.replace("\n\n", "\n").strip()
+        return text

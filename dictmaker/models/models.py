@@ -3,17 +3,14 @@ from pydantic import BaseModel
 
 class Example(BaseModel):
     ja: str
-    ro: str
+    re: str
     tr: str
-
-class Sense(BaseModel):
-    ru: str
-    notes: str = ""
 
 class Translation(BaseModel):
     word: str
     reading: str
-    senses: List[Sense] = []
+    mainsense: str
+    senses: str
     examples: List[Example] = []
 
 
